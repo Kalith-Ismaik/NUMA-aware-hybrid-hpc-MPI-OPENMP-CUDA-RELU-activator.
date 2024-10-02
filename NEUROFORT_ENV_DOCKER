@@ -1,0 +1,61 @@
+# Base image for Ubuntu (or any other Linux distro)
+FROM ubuntu:20.04
+
+# Set environment variables to prevent issues with interactive prompts during installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Update system and install necessary packages
+RUN apt-get update && apt-get install -y \
+    wget \
+    build-essential \
+    gcc \
+    g++ \
+    gfortran \
+    libnuma-dev \
+    bash \
+    libopenmpi-dev \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up environment directory
+RUN mkdir -p ~/NEUROFORT_env
+
+# Download and install NVIDIA HPC SDK 24.7.0
+RUN wget https://developer.download.nvidia.com/hpc-sdk/24.7/nvhpc_2024_247_Linux_x86_64_cuda_12.5.tar.gz \
+    && tar xpzf nvhpc_2024_247_Linux_x86_64_cuda_12.5.tar.gz \
+    && nvhpc_2024_247_Linux_x86_64_cuda_12.5/install --prefix=~/NEUROFORT_env/NVHPC --autoinstall \
+    && rm nvhpc_2024_247_Linux_x86_64_cuda_12.5.tar.gz
+
+# Export environment variables for NVIDIA HPC SDK
+ENV NVHPC_HOME=~/NEUROFORT_env/NVHPC
+ENV PATH=$NVHPC_HOME/Linux_x86_64/24.7/compilers/bin:$PATH
+ENV LD_LIBRARY_PATH=$NVHPC_HOME/Linux_x86_64/24.7/compilers/lib:$LD_LIBRARY_PATH
+ENV MANPATH=$NVHPC_HOME/Linux_x86_64/24.7/compilers/man:$MANPATH
+
+# Verify NVIDIA compilers installation
+RUN pgcc --version && pgc++ --version && pgfortran --version
+
+# Download and install OpenMPI 5.0.5
+RUN wget https://download.open-mpi.org/release/open-mpi/v5.0/openmpi-5.0.5.tar.gz \
+    && tar -xzf openmpi-5.0.5.tar.gz \
+    && cd openmpi-5.0.5 \
+    && ./configure --prefix=~/NEUROFORT_env/openmpi CC=pgcc CXX=pgc++ FC=pgfortran F77=pgfortran \
+    && make -j$(nproc) \
+    && make install \
+    && rm -rf openmpi-5.0.5.tar.gz openmpi-5.0.5
+
+# Export environment variables for OpenMPI
+ENV PATH=~/NEUROFORT_env/openmpi/bin:$PATH
+ENV LD_LIBRARY_PATH=~/NEUROFORT_env/openmpi/lib:$LD_LIBRARY_PATH
+
+# Verify OpenMPI installation
+RUN mpicc --version && mpirun --version
+
+RUN cd src \
+    && make \
+    && salloc -p gpu -N 2 --ntasks-per-node=32 --gres=gpu:2 --time=04:00:00 \
+    && mpirun -np 64 ./NeuroFort.x
+
+# Set the default command to bash
+CMD ["/bin/bash"]
