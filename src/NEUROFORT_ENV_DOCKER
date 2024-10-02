@@ -52,8 +52,7 @@ ENV LD_LIBRARY_PATH=~/NEUROFORT_env/openmpi/lib:$LD_LIBRARY_PATH
 # Verify OpenMPI installation
 RUN mpicc --version && mpirun --version
 
-RUN cd src \
-    && make \
+RUN make \
     && salloc -p gpu -N 2 --ntasks-per-node=32 --gres=gpu:2 --time=04:00:00 \
     && mpirun -np 64 ./NeuroFort.x
 
