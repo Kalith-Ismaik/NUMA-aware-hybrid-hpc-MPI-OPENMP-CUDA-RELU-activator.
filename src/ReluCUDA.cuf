@@ -1,0 +1,39 @@
+    ! 3-DIMENSIONAL RELU FORWARD FUNCTION
+    ATTRIBUTES(GLOBAL) SUBROUTINE RELUFORWARD_CUDA(X, SZ)
+    
+        INTEGER(4), DEVICE :: SZ(4)
+        REAL(8), DEVICE    :: X(SZ(2), SZ(3), SZ(4))
+
+        INTEGER :: I, J, K
+        I = (BLOCKIDX%X - 1) * BLOCKDIM%X + THREADIDX%X
+        J = (BLOCKIDX%Y - 1) * BLOCKDIM%Y + THREADIDX%Y
+        K = (BLOCKIDX%Z - 1) * BLOCKDIM%Z + THREADIDX%Z
+
+        ! Ensure I, J, K is within valid bounds
+        IF (I <= SZ(2) .and. J <= SZ(3) .and. K <= SZ(4)) THEN
+            X(I,J,K) = MAX(0.0, X(I,J,K))
+        END IF
+
+    END SUBROUTINE RELUFORWARD_CUDA
+    
+    ! 3-DIMENSIONAL RELU BACKWARD FUNCTION
+    ATTRIBUTES(GLOBAL) SUBROUTINE RELUBACKWARD_CUDA(DX, SZ)
+            
+        INTEGER(4), DEVICE :: SZ(4)
+        REAL(8), DEVICE    :: DX(SZ(2), SZ(3), SZ(4))
+
+        INTEGER :: I, J, K
+        I = (BLOCKIDX%X - 1) * BLOCKDIM%X + THREADIDX%X
+        J = (BLOCKIDX%Y - 1) * BLOCKDIM%Y + THREADIDX%Y
+        K = (BLOCKIDX%Z - 1) * BLOCKDIM%Z + THREADIDX%Z
+
+        ! Ensure I, J, K is within valid bounds
+        IF (I <= SZ(2) .and. J <= SZ(3) .and. K <= SZ(4)) THEN
+            IF (DX(I, J, K) >= 0.0) THEN
+                DX(I, J, K) = 1.0          ! Gradient is 1 for positive values
+            ELSE
+                DX(I, J, K) = 0.0          ! Gradient is 0 for negative values
+            END IF
+        END IF
+
+    END SUBROUTINE RELUBACKWARD_CUDA

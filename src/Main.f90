@@ -1,0 +1,228 @@
+PROGRAM MPI_MAIN
+
+    USE CUDAFOR
+    USE OMP_LIB  ! This provides access to OpenMP routines
+
+    USE RELU
+    
+    IMPLICIT NONE
+    
+    INCLUDE 'mpif.h' ! This provides access to MPI
+
+    INTEGER(4), PARAMETER :: NODES = 2, CORES_PER_NODE = 32
+    INTEGER(4), PARAMETER :: NUMA_NODES_PER_NODE = 8  ! Update this to match your system
+    INTEGER(4), PARAMETER :: BATCH = 8000
+
+    INTEGER(4) :: IERR, RANK, SIZE
+    INTEGER(4) :: NUMA_COMM, SHM_COMM, NUMA_MASTER_COMM
+    INTEGER(4) :: LOCAL_RANK, NUMA_RANK, NUMA_MASTER_RANK
+    INTEGER(4) :: NPROCS_NUMA, NPROCS_SHM, NPROCS_NUMA_MASTER
+
+    INTEGER(4) :: LOCAL_BATCH_SIZE, LOCAL_DATA_COUNT
+    INTEGER(4) :: LOCAL_DATA_SIZE
+    INTEGER(4) :: COLOR
+    INTEGER(4) :: WIN, DISP_UNIT
+
+    INTEGER(4) :: NDIMS
+    INTEGER(4), DIMENSION(4) :: SIZES, SUBSIZES
+
+    INTEGER(KIND=MPI_ADDRESS_KIND) :: SSIZE
+
+    INTEGER(4) :: NUM_THREADS_PER_NUMA
+
+    REAL(8), ALLOCATABLE :: GLOBAL_ARRAY(:,:,:,:)
+    REAL(8), ALLOCATABLE :: LOCAL_ARRAY(:,:,:,:)
+
+    REAL(8) :: START_TIME, END_TIME, ELAPSED_TIME, MAX_TIME
+
+    ! Set the number of threads for OpenMP based on cores per NUMA node
+    NUM_THREADS_PER_NUMA = CORES_PER_NODE / NUMA_NODES_PER_NODE
+    CALL OMP_SET_NUM_THREADS(NUM_THREADS_PER_NUMA)
+
+    ! Set the OpenMP thread placement strategy within the code
+    CALL SYSTEM("export OMP_PROC_BIND=close")
+    CALL SYSTEM("export OMP_PLACES=threads")
+
+    ! INITIALIZE MPI
+    CALL MPI_INIT(IERR)
+    CALL MPI_COMM_RANK(MPI_COMM_WORLD, RANK, IERR)
+    CALL MPI_COMM_SIZE(MPI_COMM_WORLD, SIZE, IERR)
+
+    ! SPLIT COMMUNICATOR BASED ON NUMA DOMAIN
+    CALL MPI_COMM_SPLIT_TYPE(MPI_COMM_WORLD, OMPI_COMM_TYPE_NUMA, 0, MPI_INFO_NULL, NUMA_COMM, IERR)
+    CALL MPI_COMM_RANK(NUMA_COMM, NUMA_RANK, IERR)
+    CALL MPI_COMM_SIZE(NUMA_COMM, NPROCS_NUMA, IERR)
+
+    ! NOW SPLIT BASED ON SHARED MEMORY WITHIN EACH NUMA DOMAIN
+    CALL MPI_COMM_SPLIT_TYPE(NUMA_COMM, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, SHM_COMM, IERR)
+    CALL MPI_COMM_RANK(SHM_COMM, LOCAL_RANK, IERR)
+    CALL MPI_COMM_SIZE(SHM_COMM, NPROCS_SHM, IERR)
+
+    ! CREATE COMMUNICATOR FOR NUMA MASTER PROCESSES
+    COLOR = 0
+    IF (NUMA_RANK == 0) THEN
+        COLOR = 1
+        CALL MPI_COMM_SPLIT(MPI_COMM_WORLD, COLOR, RANK, NUMA_MASTER_COMM, IERR)
+        CALL MPI_COMM_RANK(NUMA_MASTER_COMM, NUMA_MASTER_RANK, IERR)
+        CALL MPI_COMM_SIZE(NUMA_MASTER_COMM, NPROCS_NUMA_MASTER, IERR)
+    ELSE
+        CALL MPI_COMM_SPLIT(MPI_COMM_WORLD, COLOR, RANK, NUMA_MASTER_COMM, IERR)
+    END IF
+
+    ! CALCULATE LOCAL BATCH SIZE FOR NUMA DOMAINS
+    LOCAL_BATCH_SIZE = BATCH / (NUMA_NODES_PER_NODE * NODES)
+    IF (LOCAL_BATCH_SIZE < 1) LOCAL_BATCH_SIZE = 1
+
+    NDIMS    = 4
+    SIZES    = [BATCH, 100, 100, 100] ! Global size
+    SUBSIZES = [LOCAL_BATCH_SIZE, 100, 100, 100] ! Local size per NUMA domain
+
+    IF (RANK == 0) THEN
+        PRINT *, "Number of NUMA Domains:", NPROCS_NUMA_MASTER
+        PRINT *, "Global array size    :", SIZES
+        PRINT *, "Local array size     :", SUBSIZES 
+    END IF
+
+    ! ALLOCATE SHARED MEMORY WITHIN THE NUMA DOMAIN
+    IF (NUMA_RANK == 0) THEN
+        LOCAL_DATA_COUNT = PRODUCT(SUBSIZES)
+        LOCAL_DATA_SIZE  = PRODUCT(SUBSIZES) * 8
+
+        ALLOCATE(LOCAL_ARRAY(SUBSIZES(1), SUBSIZES(2), SUBSIZES(3), SUBSIZES(4)), STAT=IERR)
+        IF (IERR /= 0) THEN
+            PRINT *, "Rank", RANK, ": Memory allocation failed for LOCAL_ARRAY"
+            CALL MPI_ABORT(MPI_COMM_WORLD, IERR, IERR)
+        END IF
+        PRINT *, "Rank", RANK, ": LOCAL_BATCH_SIZE =", LOCAL_BATCH_SIZE, "LOCAL_DATA_SIZE =", LOCAL_DATA_COUNT
+
+        CALL MPI_WIN_ALLOCATE_SHARED(LOCAL_DATA_SIZE, 8, MPI_INFO_NULL, SHM_COMM, LOCAL_ARRAY, WIN, IERR)
+        IF (IERR /= MPI_SUCCESS) THEN
+            WRITE(*,*) "ERROR: MPI_Win_allocate_shared failed on node", LOCAL_RANK
+            CALL MPI_ABORT(MPI_COMM_WORLD, 1, IERR)
+        END IF
+        WRITE(*,*) "Progress 102: Shared Memory Allocated on NUMA Architecture Rank-0"
+    ELSE
+        LOCAL_DATA_SIZE = 0
+
+        ALLOCATE(LOCAL_ARRAY(0, 0, 0, 0), STAT=IERR)
+        IF (IERR /= 0) THEN
+            PRINT *, "Rank", RANK, ": Memory allocation failed for LOCAL_ARRAY"
+            CALL MPI_ABORT(MPI_COMM_WORLD, IERR, IERR)
+        END IF
+        
+        CALL MPI_WIN_ALLOCATE_SHARED(LOCAL_DATA_SIZE, 8, MPI_INFO_NULL, SHM_COMM, LOCAL_ARRAY, WIN, IERR)
+        IF (IERR /= MPI_SUCCESS) THEN
+            WRITE(*,*) "ERROR: MPI_Win_allocate_shared failed on node", LOCAL_RANK
+            CALL MPI_ABORT(MPI_COMM_WORLD, 1, IERR)
+        END IF
+        WRITE(*,*) "Progress 103: Shared Memory Allocated on NUMA Architecture Rank-N!=0"
+
+        CALL MPI_WIN_SHARED_QUERY(WIN, 0, SSIZE, DISP_UNIT, LOCAL_ARRAY, IERR)
+        IF (IERR /= MPI_SUCCESS) THEN
+            WRITE(*,*) "ERROR: MPI_Win_shared_query failed on NUMA shared Architecture", LOCAL_RANK
+            CALL MPI_ABORT(MPI_COMM_WORLD, 1, IERR)
+        END IF
+        WRITE(*,*) "Progress 104: Established MPI Shared Window Query"
+    END IF
+
+    ! ENSURE ALL PROCESSES HAVE COMPLETED MEMORY ALLOCATION
+    CALL MPI_BARRIER(NUMA_COMM, IERR)
+
+    ! Root process allocates and initializes global array
+    IF (RANK == 0) THEN
+        ALLOCATE(GLOBAL_ARRAY(SIZES(1), SIZES(2), SIZES(3), SIZES(4)), STAT=IERR)
+        IF (IERR /= 0) THEN
+            PRINT *, "Rank 0: Memory allocation failed for GLOBAL_ARRAY"
+            CALL MPI_ABORT(MPI_COMM_WORLD, IERR, IERR)
+        END IF
+        
+        ! Initialize GLOBAL_ARRAY
+        GLOBAL_ARRAY = 1.0
+    END IF
+
+    ! ENSURE ALL PROCESSES HAVE COMPLETED MEMORY ALLOCATION
+    CALL MPI_BARRIER(MPI_COMM_WORLD, IERR)
+
+    ! Scatter data only among NUMA master processes
+    IF (NUMA_RANK == 0) THEN
+        CALL MPI_SCATTER(GLOBAL_ARRAY, LOCAL_DATA_COUNT, MPI_REAL8, &
+                         LOCAL_ARRAY, LOCAL_DATA_COUNT, MPI_REAL8, &
+                         0, NUMA_MASTER_COMM, IERR)
+        IF (IERR /= MPI_SUCCESS) THEN
+            PRINT *, "Rank", RANK, ": MPI_SCATTER failed with error", IERR
+            CALL MPI_ABORT(MPI_COMM_WORLD, IERR, IERR)
+        END IF
+    END IF
+
+    ! ENSURE ALL PROCESSES HAVE COMPLETED MEMORY ALLOCATION
+    CALL MPI_BARRIER(NUMA_COMM, IERR)
+
+    ! Start timing before RELUFORWARD
+    START_TIME = MPI_WTIME()
+
+    ! Here you would implement your OpenMP parallelization within each NUMA domain
+    ! Example (pseudo-code):
+    IF (NUMA_RANK == 0) THEN
+        CALL RELUFORWARD(LOCAL_ARRAY)
+        !CALL TEST_THREAD()
+    ENDIF
+
+    ! End timing after RELUFORWARD
+    END_TIME = MPI_WTIME()
+
+    ! Calculate elapsed time
+    ELAPSED_TIME = END_TIME - START_TIME
+
+    ! Find the maximum time across all processes
+    CALL MPI_REDUCE(ELAPSED_TIME, MAX_TIME, 1, MPI_REAL8, MPI_MAX, 0, MPI_COMM_WORLD, IERR)
+
+    ! Print the timing result
+    IF (RANK == 0) THEN
+        PRINT *, "Time taken for RELUFORWARD: ", MAX_TIME, " seconds"
+    END IF
+
+    ! ENSURE ALL PROCESSES HAVE COMPLETED MEMORY ALLOCATION
+    CALL MPI_BARRIER(NUMA_COMM, IERR)
+
+    ! Gather data from NUMA master processes back to the GLOBAL_ARRAY on rank 0
+    IF (NUMA_RANK == 0) THEN
+        CALL MPI_GATHER(LOCAL_ARRAY, LOCAL_DATA_COUNT, MPI_REAL8, &
+                        GLOBAL_ARRAY, LOCAL_DATA_COUNT, MPI_REAL8, &
+                        0, NUMA_MASTER_COMM, IERR)
+        IF (IERR /= MPI_SUCCESS) THEN
+            PRINT *, "Rank", RANK, ": MPI_GATHER failed with error", IERR
+            CALL MPI_ABORT(MPI_COMM_WORLD, IERR, IERR)
+        END IF
+    END IF
+
+    ! Clean up
+    IF (RANK == 0) THEN
+        DEALLOCATE(GLOBAL_ARRAY)
+    END IF
+    IF (NUMA_RANK == 0) THEN
+        DEALLOCATE(LOCAL_ARRAY)
+    END IF
+
+    ! FINALIZE MPI
+    CALL MPI_WIN_FREE(WIN, IERR)
+    IF (NUMA_RANK == 0) THEN
+        CALL MPI_COMM_FREE(NUMA_MASTER_COMM, IERR)
+    ENDIF
+
+    CALL MPI_COMM_FREE(SHM_COMM, IERR)
+    CALL MPI_COMM_FREE(NUMA_COMM, IERR)
+    CALL MPI_FINALIZE(IERR)
+
+    CONTAINS
+
+    SUBROUTINE TEST_THREAD()
+
+        INTEGER(4) :: NUM_THREADS
+
+        NUM_THREADS = OMP_GET_MAX_THREADS()
+
+        WRITE(*,*) "Number of threads available in that NUMA node: ", NUM_THREADS
+
+    END SUBROUTINE TEST_THREAD
+
+END PROGRAM MPI_MAIN
